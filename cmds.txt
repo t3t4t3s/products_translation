@@ -6,12 +6,15 @@ php ../wp-cli.phar eval-file ./set-lang-fr-al-products.php 1>products_fr.json 2>
 1 - EXPORTER LA LISTE DES PRODUITS FR (produits "al_product" et "fr")
 cd www_ps8
 php ../wp-cli.phar eval-file ./export-al-products.php 1>products_fr.json 2>errors.log
+scp -P 22 arasiadehm@ssh.cluster023.hosting.ovh.net:/homez.92/arasiadehm/www_ps8/products_fr.json "C:\Users\jeanc\JCJ\translation\products_translation\"
 
 2 - TRADUIRE FR->EN PUIS EN->ES
-python translate_products_argos.py --source fr --target en --target-name "English" --input products_fr.json --output products_en.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_en.json --glossary-mode word --progress auto
-python translate_products_argos.py --source en --target es --target-name "Español" --input products_en.json --output products_es.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_es.json --glossary-mode word --progress auto
+python translate_products_argos.py --source fr --target en --target-name "English" --input products_fr.json --output products_en.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_en.json --glossary-mode word --progress auto --strip-strong
+python translate_products_argos.py --source en --target es --target-name "Español" --input products_en.json --output products_es.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_es.json --glossary-mode word --progress auto --strip-strong
 
 3 - CREATION / MISE A JOUR DES NOUVEAUX PRODUITS TRADUITS
+scp -P 22 "C:\Users\jeanc\JCJ\translation\products_translation\products_en.json" arasiadehm@ssh.cluster023.hosting.ovh.net:/homez.92/arasiadehm/www_ps8/
+scp -P 22 "C:\Users\jeanc\JCJ\translation\products_translation\products_es.json" arasiadehm@ssh.cluster023.hosting.ovh.net:/homez.92/arasiadehm/www_ps8/
 
 3.1 - EN CREATION
 php ../wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/homez.92/arasiadehm/www_ps8/products_en.json --update=0 --id-only=0 --prefer-id=0 --preserve-slug=0 --status=publish --link-siblings=1 --create-slug-suffix=-en

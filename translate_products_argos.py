@@ -8,6 +8,7 @@ translate_products_argos.py
  - Copie l'ID source dans "source_id" (option --set-source-id)
  - Glossaire de traductions forcées respectant la casse (tokens sûrs __GLS0__)
  - Barre de progression simple (--progress auto)
+ - Option --strip-strong pour retirer <strong>...</strong> avant traduction
 
 Entrée:  JSON (array) avec des objets type:
 {
@@ -30,7 +31,7 @@ from typing import Any, Dict, List, Callable
 # ---------- Argos Translate ----------
 def build_translator(src_code: str, tgt_code: str) -> Callable[[str], str]:
     try:
-        import argostranslate.package as argos_package  # noqa: F401  (utile si tu veux installer dynamiquement)
+        import argostranslate.package as argos_package  # noqa: F401
         import argostranslate.translate as argos_translate
     except Exception as e:
         raise RuntimeError("Argos Translate n'est pas installé: pip install argostranslate") from e
@@ -41,7 +42,7 @@ def build_translator(src_code: str, tgt_code: str) -> Callable[[str], str]:
     if not src or not tgt:
         raise RuntimeError(f"Aucun package Argos pour {src_code}->{tgt_code}. Installez le paquet correspondant.")
 
-    # Compatibilité avec versions Argos différentes
+    # Compat : certaines versions ont des API différentes
     try:
         tr = src.get_translation(tgt)
     except Exception:
@@ -168,7 +169,22 @@ def _split_leading_trailing_html_spaces(s: str):
         return "", s, ""
     return (m.group(1) or ""), (m.group(2) or ""), (m.group(3) or "")
 
-def translate_html_string(s: str, translate_fn: Callable[[str], str], emoji_mode: str = "keep") -> str:
+# --- STRIP <strong> ---
+STRONG_OPEN_RE  = re.compile(r"<\s*strong\b[^>]*>", flags=re.IGNORECASE)
+STRONG_CLOSE_RE = re.compile(r"<\s*/\s*strong\s*>", flags=re.IGNORECASE)
+def _strip_strong_tags(html: str) -> str:
+    if not html:
+        return html
+    html = STRONG_OPEN_RE.sub("", html)
+    html = STRONG_CLOSE_RE.sub("", html)
+    return html
+
+def translate_html_string(s: str, translate_fn: Callable[[str], str],
+                          emoji_mode: str = "keep", strip_strong: bool = False) -> str:
+    # Retirer <strong>...</strong> avant traduction si demandé
+    if strip_strong and s:
+        s = _strip_strong_tags(s)
+
     # Texte sans HTML
     if not s or ("<" not in s and ">" not in s):
         if not s:
@@ -286,23 +302,21 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
     Respect de la casse détectée sur l'occurrence source.
 
     Correctifs :
-    - Tokens ASCII stables __GLS0__ (évite tout caractère parasite).
-    - Les paires dont la cible est vide sont ignorées (évite texte vidé).
+    - Tokens ASCII stables __GLS0__
+    - Restauration ROBUSTE (tolère un underscore/espaces manquants)
+    - Ignore les paires dont la cible est vide
     """
     if not glossary:
         return base_translate_fn
 
-    # Filtrer paires vides cibles → pas d'application qui conduirait à du texte perdu
+    # Filtrer paires vides
     items_raw = [(str(k), str(v)) for k, v in glossary.items()]
     items_raw = [(k, v) for (k, v) in items_raw if v != ""]
-
     if not items_raw:
         return base_translate_fn
 
-    # Trier par longueur décroissante pour éviter recouvrements (ex: "Air" vs "Air conditioner")
+    # Trier par longueur décroissante (évite recouvrements)
     items = sorted(items_raw, key=lambda kv: len(kv[0]), reverse=True)
-
-    # LUT pour retrouver rapidement la cible (en lower)
     lut_lower = {k.lower(): v for k, v in items}
 
     escaped = [re.escape(src) for src, _ in items if src]
@@ -320,10 +334,20 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
     def _make_token(i: int) -> str:
         return f"__GLS{i}__"
 
-    token_re = re.compile(r"__GLS\d+__")
+    # ⚠️ Nouveau : on restaure par ID, avec pattern tolérant :
+    #   __GLS12__   (idéal)
+    #   __GLS12_    (un _ manquant)
+    #   _GLS12__    (un _ manquant au début)
+    #   __ GLS 12 __ (espaces insérés)
+    restore_pat = re.compile(
+        r"""
+        _{1,2}\s*GLS\s*(\d+)\s*_{1,2}     # tolère 1 ou 2 underscores et des espaces
+        """,
+        re.IGNORECASE | re.UNICODE | re.VERBOSE
+    )
 
     def translate_with_glossary(text: str) -> str:
-        token_map = {}
+        id2tgt: Dict[int, str] = {}
         idx = 0
 
         def _repl(m: re.Match) -> str:
@@ -331,25 +355,35 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
             src_found = m.group(0)
             tgt_base = lut_lower.get(src_found.lower())
             if tgt_base is None:
-                # Sécurité (ne devrait pas arriver car tout est dans le même pattern)
+                # Sécurité : ne devrait pas arriver
                 return src_found
-            # Respect de la casse détectée sur l'occurrence
+
+            # Respect de la casse de l'occurrence source
             case_mode = _detect_case(src_found)
             tgt_final = _apply_case(tgt_base, case_mode)
+
             token = _make_token(idx)
-            token_map[token] = tgt_final
+            id2tgt[idx] = tgt_final
             idx += 1
             return token
 
-        # 1) Protéger les occurrences du glossaire
+        # 1) Protéger les occurrences
         protected = pattern.sub(_repl, text)
 
         # 2) Traduire le reste
         translated = base_translate_fn(protected)
 
-        # 3) Restaurer les tokens
-        if token_map:
-            translated = token_re.sub(lambda m: token_map.get(m.group(0), m.group(0)), translated)
+        # 3) Restauration par ID (robuste aux petites altérations)
+        if id2tgt:
+            def _restore(m: re.Match) -> str:
+                num = m.group(1)
+                try:
+                    i = int(num)
+                    return id2tgt.get(i, m.group(0))
+                except Exception:
+                    return m.group(0)
+
+            translated = restore_pat.sub(_restore, translated)
 
         return translated
 
@@ -371,13 +405,14 @@ def _end_progress():
 # ---------- Translation of one product ----------
 def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, Any]:
     out = json.loads(json.dumps(prod))  # deep copy
-    emoji_mode = getattr(options, "emoji_mode", "keep")
+    emoji_mode   = getattr(options, "emoji_mode", "keep")
+    strip_strong = bool(getattr(options, "strip_strong", False))
 
     # Text/HTML fields
     if "content_short" in out and out["content_short"] is not None:
-        out["content_short"] = translate_html_string(out["content_short"], translate_fn, emoji_mode)
+        out["content_short"] = translate_html_string(out["content_short"], translate_fn, emoji_mode, strip_strong)
     if "content_long" in out and out["content_long"] is not None:
-        out["content_long"]  = translate_html_string(out["content_long"],  translate_fn, emoji_mode)
+        out["content_long"]  = translate_html_string(out["content_long"],  translate_fn, emoji_mode, strip_strong)
 
     # Name (usually plain text)
     if "name" in out and out["name"] is not None:
@@ -391,7 +426,7 @@ def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, 
     # Yoast / metas (exemples courants)
     meta = out.get("meta") or {}
     if "_yoast_wpseo_metadesc" in meta and meta["_yoast_wpseo_metadesc"] is not None:
-        meta["_yoast_wpseo_metadesc"] = translate_html_string(meta["_yoast_wpseo_metadesc"], translate_fn, emoji_mode)
+        meta["_yoast_wpseo_metadesc"] = translate_html_string(meta["_yoast_wpseo_metadesc"], translate_fn, emoji_mode, strip_strong)
     if "_yoast_wpseo_title" in meta and meta["_yoast_wpseo_title"] is not None:
         meta["_yoast_wpseo_title"] = translate_fn(meta["_yoast_wpseo_title"])
     if "_yoast_wpseo_focuskw" in meta and meta["_yoast_wpseo_focuskw"] is not None:
@@ -432,8 +467,9 @@ def main():
     p.add_argument("--set-source-id", action="store_true", help="Copie 'id' d'origine dans 'source_id'.")
     p.add_argument("--slug-from-name", action="store_true", help="Génère le slug depuis le nom traduit.")
     p.add_argument("--emoji-mode", choices=["keep", "translate"], default="keep", help="Préserver les emojis (keep) ou les laisser passer au traducteur (translate).")
+    p.add_argument("--strip-strong", action="store_true", help="Supprime les balises <strong> et </strong> avant la traduction.")
 
-    # Glossaire & progress (déjà présents, pas de nouveaux arguments ajoutés ici)
+    # Glossaire & progress
     p.add_argument("--glossary-file", default="", help="Fichier glossaire (JSON {src: tgt} ou lignes 'src=tgt').")
     p.add_argument("--glossary-pair", action="append", default=[], help="Paire 'src=tgt' (répétable).")
     p.add_argument("--glossary-mode", choices=["word", "substring"], default="word", help="Correspondance 'word' (délimitée) ou 'substring'.")
