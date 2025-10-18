@@ -1,0 +1,22 @@
+0 - UTILITAIRES
+cd www_ps8
+php ~/wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 post create --post_type=al_product --post_status=draft --post_title="Test via CLI" --porcelain
+php ../wp-cli.phar eval-file ./set-lang-fr-al-products.php 1>products_fr.json 2>errors.log
+
+1 - EXPORTER LA LISTE DES PRODUITS FR (produits "al_product" et "fr")
+cd www_ps8
+php ../wp-cli.phar eval-file ./export-al-products.php 1>products_fr.json 2>errors.log
+
+2 - TRADUIRE FR->EN PUIS EN->ES
+python translate_products_argos.py --source fr --target en --target-name "English" --input products_fr.json --output products_en.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_en.json --glossary-mode word --progress auto
+python translate_products_argos.py --source en --target es --target-name "Español" --input products_en.json --output products_es.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_es.json --glossary-mode word --progress auto
+
+3 - CREATION / MISE A JOUR DES NOUVEAUX PRODUITS TRADUITS
+
+3.1 - EN CREATION
+php ../wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/homez.92/arasiadehm/www_ps8/products_en.json --update=0 --id-only=0 --prefer-id=0 --preserve-slug=0 --status=publish --link-siblings=1 --create-slug-suffix=-en
+php ../wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/homez.92/arasiadehm/www_ps8/products_es.json --update=0 --id-only=0 --prefer-id=0 --preserve-slug=0 --status=publish --link-siblings=1 --create-slug-suffix=-es
+
+3.2 - EN MISE A JOUR (NOUVEAUX PRODUITS)
+php ../wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/homez.92/arasiadehm/www_ps8/products_en.json --update=1 --update-if-changed=1 --id-only=0 --prefer-id=1 --preserve-slug=1 --status=publish --link-siblings=1 --create-slug-suffix=-en
+php ../wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/homez.92/arasiadehm/www_ps8/products_es.json --update=1 --update-if-changed=1 --id-only=0 --prefer-id=1 --preserve-slug=1 --status=publish --link-siblings=1 --create-slug-suffix=-es
