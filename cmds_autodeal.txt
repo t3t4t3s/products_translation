@@ -1,0 +1,39 @@
+0 - INSTALLER wp-cli
+ssh -v autodeal-prod
+cd ~
+curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+php wp-cli.phar --info
+
+scp "C:\Users\jeanc\JCJ\translation\products_translation\export-al-products.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-command.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+
+1 - EXPORTER LA LISTE DES PRODUITS FR (produits "al_product" et "fr")
+cd /home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html
+php ~/wp-cli.phar eval-file ./export-al-products.php 1>products_fr.json 2>products_export_errors.log
+scp autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_fr.json "C:\Users\jeanc\JCJ\translation\products_translation\"
+
+2 - TRADUIRE FR->EN PUIS EN->ES
+python translate_products_argos.py --source fr --target en --target-name "English" --input products_fr.json --output products_en.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_en.json --glossary-mode word --progress auto --strip-strong
+python translate_products_argos.py --source en --target es --target-name "Español" --input products_en.json --output products_es.json --null-id --slug-from-name --set-source-id --emoji-mode keep --glossary-file glossary_es.json --glossary-mode word --progress auto --strip-strong
+
+3 - CREATION / MISE A JOUR DES NOUVEAUX PRODUITS TRADUITS
+scp "C:\Users\jeanc\JCJ\translation\products_translation\products_en.json" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+scp "C:\Users\jeanc\JCJ\translation\products_translation\products_es.json" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+
+3.1 - EN CREATION
+php ~/wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_en.json --update=0 --id-only=0 --prefer-id=0 --preserve-slug=0 --status=publish --link-siblings=1 --create-slug-suffix=-en
+php ~/wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_es.json --update=0 --id-only=0 --prefer-id=0 --preserve-slug=0 --status=publish --link-siblings=1 --create-slug-suffix=-es
+
+3.2 - EN MISE A JOUR (NOUVEAUX PRODUITS)
+php ~/wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_en.json --update=1 --update-if-changed=1 --id-only=0 --prefer-id=1 --preserve-slug=1 --status=publish --link-siblings=1 --create-slug-suffix=-en
+php ~/wp-cli.phar --require=wpcli-alprod-command.php alprod import --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_es.json --update=1 --update-if-changed=1 --id-only=0 --prefer-id=1 --preserve-slug=1 --status=publish --link-siblings=1 --create-slug-suffix=-es
+
+
+4 - DELETE PRODUCTS BY LANG
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-delete.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=en --trash=1
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=en --force=1
+
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=es --trash=1
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=es --force=1
