@@ -9,7 +9,7 @@ scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-command.ph
 
 1 - EXPORTER LA LISTE DES PRODUITS FR (produits "al_product" et "fr")
 cd /home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html
-php ~/wp-cli.phar eval-file ./export-al-products.php 1>products_fr.json 2>products_export_errors.log
+php ~/wp-cli.phar eval-file ./export-al-products.php -- fr,en,es al_product al_product-cat 1>products_fr.json 2>products_export_errors.log
 scp autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_fr.json "C:\Users\jeanc\JCJ\translation\products_translation\"
 
 2 - TRADUIRE FR->EN PUIS EN->ES

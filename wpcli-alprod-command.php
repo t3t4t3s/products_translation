@@ -7,7 +7,57 @@ class AL_Product_Importer_Command {
     private $source_id_key   = '_source_id';
     private $allowed_status  = [ 'publish','draft','pending','private','future' ];
 
-    
+
+
+    /**
+     * Assigne les catégories traduites pour la langue $lang à partir du bloc
+     * "al_product-cat_ids": {"fr":[...], "en":[...], "es":[...]} présent dans $payload.
+     */
+    private function assign_categories_from_ids( int $post_id, array $payload, string $lang, bool $debug = false ): void {
+        $tax = 'al_product-cat';
+        if ( $debug ) WP_CLI::log("[TAX] Try assign {$tax} for #{$post_id} payload-lang=".json_encode($lang));
+
+        if ( ! taxonomy_exists( $tax ) ) { if ( $debug ) WP_CLI::warning("[TAX] Taxonomy '{$tax}' inexistante, skip."); return; }
+
+        $key_ids = $tax . '_ids'; // attend 'al_product-cat_ids' dans le JSON
+        if ( empty( $payload[$key_ids] ) || ! is_array( $payload[$key_ids] ) ) {
+            if ( $debug ) WP_CLI::log("[TAX] Clé absente : '{$key_ids}' dans payload, skip.");
+            return;
+        }
+
+        // Normaliser ta langue
+        $lang = function_exists('normalize_lang_code') ? normalize_lang_code($lang) : strtolower(trim((string)$lang));
+        if ( empty($lang) || empty( $payload[$key_ids][$lang] ) || ! is_array( $payload[$key_ids][$lang] ) ) {
+            if ( $debug ) {
+                $have_keys = implode(',', array_keys((array)$payload[$key_ids]));
+                WP_CLI::log("[TAX] Pas d'IDs pour '{$lang}'. Clés dispos: {$have_keys}.");
+            }
+            return;
+        }
+
+        $term_ids = array_values(array_filter(array_map('intval', $payload[$key_ids][$lang]), static fn($v)=>$v>0));
+        if ( empty($term_ids) ) { if ( $debug ) WP_CLI::log("[TAX] Liste d'IDs vide pour '{$lang}', skip."); return; }
+
+        // Valider l’existence des termes
+        $valid = [];
+        foreach ($term_ids as $tid) {
+            $t = get_term($tid, $tax);
+            if ( $t && ! is_wp_error($t) ) { $valid[] = $tid; }
+            elseif ( $debug ) { WP_CLI::log("[TAX] Term inexistant: {$tax}#{$tid}"); }
+        }
+        if ( empty($valid) ) { if ( $debug ) WP_CLI::log("[TAX] Aucun term valide à assigner pour '{$lang}', skip."); return; }
+
+        $res = wp_set_object_terms( $post_id, $valid, $tax, false );
+        if ( is_wp_error($res) ) {
+            WP_CLI::warning("[TAX] Erreur assignation {$tax} sur #{$post_id}: ".$res->get_error_message());
+        } else {
+            if ( $debug ) WP_CLI::log("[TAX] Set {$tax} on #{$post_id} lang={$lang} ids=".json_encode($valid));
+            clean_object_term_cache( $post_id, get_post_type( $post_id ) );
+        }
+    }
+
+
+
     /** =======================
      *  Image helpers
      *  ======================= */
@@ -201,6 +251,30 @@ public function import( $args, $assoc ) {
                     $post_id = wp_update_post($postarr, true); $action='update';
                     if (is_wp_error($post_id)) { $errors++; WP_CLI::warning(strtoupper($action)." ERROR: ".$post_id->get_error_message()); continue; }
                     $actual_id = (int)$post_id;
+
+                    // assigner les catégories traduites (al_product-cat_ids[lang]) aussi en UPDATE
+                    // Langue depuis $row + normalisation
+                    $__prod_lang = !empty($row['lang']) && is_string($row['lang']) ? $row['lang'] : '';
+                    $__prod_lang = function_exists('normalize_lang_code') ? normalize_lang_code($__prod_lang) : strtolower(trim($__prod_lang));
+
+                    // Debug commun (réutilise ton flag)
+                    $__debug_tax = !empty($assoc_args['debug-linking']) || !empty($assoc_args['debug-tax']);
+
+                    // Pose la langue si dispo
+                    if ( !empty($__prod_lang) && function_exists('pll_set_post_language') ) {
+                        pll_set_post_language($actual_id, $__prod_lang);
+                        if ($__debug_tax) WP_CLI::log("[DEBUG] set lang {$__prod_lang} on ID {$actual_id} (update)");
+                    }
+
+                    // Linking interlangues si demandé
+                    if ( !empty($assoc_args['link-siblings']) ) {
+                        $this->link_with_siblings( $actual_id, $row, $__prod_lang, $__debug_tax );
+                    }
+
+                    // 👉 Assignation des catégories traduites (utilise $row)
+                    $this->assign_categories_from_ids($actual_id, $row, $__prod_lang, $__debug_tax);
+
+
                 } else {
                     WP_CLI::log("[SKIP] Existing {$existing_id} and --update=0"); $skipped++; continue;
                 }
@@ -212,6 +286,28 @@ public function import( $args, $assoc ) {
                 $post_id = wp_insert_post($postarr, true); $action='create';
                 if (is_wp_error($post_id)) { $errors++; WP_CLI::warning(strtoupper($action)." ERROR: ".$post_id->get_error_message()); continue; }
                 $actual_id = (int)$post_id;
+
+                // assigner les catégories traduites (al_product-cat_ids[lang]) en CREATE
+                // Langue depuis $row + normalisation
+                $__prod_lang = !empty($row['lang']) && is_string($row['lang']) ? $row['lang'] : '';
+                $__prod_lang = function_exists('normalize_lang_code') ? normalize_lang_code($__prod_lang) : strtolower(trim($__prod_lang));
+
+                // Debug commun
+                $__debug_tax = !empty($assoc_args['debug-linking']) || !empty($assoc_args['debug-tax']);
+
+                // Pose la langue
+                if ( !empty($__prod_lang) && function_exists('pll_set_post_language') ) {
+                    pll_set_post_language($actual_id, $__prod_lang);
+                    if ($__debug_tax) WP_CLI::log("[DEBUG] set lang {$__prod_lang} on ID {$actual_id} (create)");
+                }
+
+                // Linking si demandé
+                if ( !empty($assoc_args['link-siblings']) ) {
+                    $this->link_with_siblings( $actual_id, $row, $__prod_lang, $__debug_tax );
+                }
+
+                // 👉 Assignation des catégories traduites
+                $this->assign_categories_from_ids($actual_id, $row, $__prod_lang, $__debug_tax);
             }
 
             // ----- Post-write steps (only when we really wrote) -----

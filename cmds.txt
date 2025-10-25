@@ -5,7 +5,7 @@ php ../wp-cli.phar eval-file ./set-lang-fr-al-products.php 1>products_fr.json 2>
 
 1 - EXPORTER LA LISTE DES PRODUITS FR (produits "al_product" et "fr")
 cd www_ps8
-php ../wp-cli.phar eval-file ./export-al-products.php 1>products_fr.json 2>errors.log
+php ../wp-cli.phar eval-file ./export-al-products.php -- fr,en,es al_product al_product-cat 1>products_fr.json 2>errors.log
 scp -P 22 arasiadehm@ssh.cluster023.hosting.ovh.net:/homez.92/arasiadehm/www_ps8/products_fr.json "C:\Users\jeanc\JCJ\translation\products_translation\"
 
 2 - TRADUIRE FR->EN PUIS EN->ES
