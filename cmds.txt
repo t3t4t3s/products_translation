@@ -33,3 +33,10 @@ php ../wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 --require=/homez.92/arasi
 
 php ../wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 --require=/homez.92/arasiadehm/www_ps8/wpcli-alprod-delete.php alprod delete-lang --lang=es --trash=1
 php ../wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 --require=/homez.92/arasiadehm/www_ps8/wpcli-alprod-delete.php alprod delete-lang --lang=es --force=1
+
+
+5 - CORRECT HTML errors
+scp -P 22 "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-fix-li.php" arasiadehm@ssh.cluster023.hosting.ovh.net:/homez.92/arasiadehm/www_ps8/
+
+php ../wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 --require=wpcli-alprod-fix-li.php alprod fix-li-p --run
+php ../wp-cli.phar --path=/homez.92/arasiadehm/www_ps8 --require=wpcli-alprod-fix-li.php alprod fix-li-p --run --id=373 --verbose

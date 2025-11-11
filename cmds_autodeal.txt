@@ -37,3 +37,10 @@ php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html 
 
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=es --trash=1
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-delete.php alprod delete-lang --lang=es --force=1
+
+
+5 - CORRECT HTML errors
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-fix-li.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-fix-li.php alprod fix-li-p --run --verbose
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-fix-li.php alprod fix-li-p --run --id=10303 --verbose

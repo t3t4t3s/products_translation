@@ -153,4 +153,7 @@ foreach ($posts as $p) {
   ];
 }
 
-echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+$json = json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+// Remplace 18&#8243; -> 18″ (et &Prime; -> ″) partout, en une fois
+$json = str_replace(['&#8243;', '&Prime;'], '″', $json);
+echo $json;
