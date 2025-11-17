@@ -8,7 +8,11 @@
   "Computique": "Computique",
   "SAV": "CS",
   "Frigidaire": "Frigidaire", 
+  "Marque": "Brand", 
   "Whirlpool": "Whirlpool", 
   "Oster": "Oster", 
-  "Black & Decker": "Black & Decker"
+  "Black & Decker": "Black & Decker",
+  "Black": "Black",
+  "&": "&",
+  "Decker": "Decker"
 }

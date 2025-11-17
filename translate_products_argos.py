@@ -9,6 +9,7 @@ translate_products_argos.py
  - Glossaire de traductions forcées respectant la casse (tokens sûrs __GLS0__)
  - Barre de progression simple (--progress auto)
  - Option --strip-strong pour retirer <strong>...</strong> avant traduction
+ - ✅ Traduit aussi les attributs (meta & tax al_product-attributes)
 
 Entrée:  JSON (array) avec des objets type:
 {
@@ -18,8 +19,8 @@ Entrée:  JSON (array) avec des objets type:
   "slug": "climatiseur-...",
   "content_short": "<b>Puissant</b> 🙂 ...",
   "content_long": "...",
-  "meta": { "_yoast_wpseo_title": "...", "_sku": "ABC123" },
-  "tax": { "language": ["Français"] }
+  "meta": { "_yoast_wpseo_title": "...", "_sku": "ABC123", "_attribute1": "LAVE LINGE" },
+  "tax": { "al_product-attributes": [ { "id": 101, "slug": "tension", "name": "TENSION" } ] }
 }
 
 Sortie: même structure, avec champs traduits et options appliquées.
@@ -66,7 +67,7 @@ def build_translator(src_code: str, tgt_code: str) -> Callable[[str], str]:
 
 # ---------- Emoji / HTML helpers ----------
 EMOJI_RE = re.compile(
-    "["                   # blocs généraux d’emojis & symboles
+    "["                   
     "\U0001F300-\U0001F5FF"
     "\U0001F600-\U0001F64F"
     "\U0001F680-\U0001F6FF"
@@ -84,7 +85,7 @@ EMOJI_RE = re.compile(
 )
 
 TAG_RE = re.compile(r"(<[^>]+>)")
-NBSP_TOKEN = "\uF000NBSP\uF000"  # Placeholder sûr pour préserver &nbsp;
+NBSP_TOKEN = "\uF000NBSP\uF000"
 
 def split_html_preserve_tags(s: str) -> List[str]:
     parts = []
@@ -102,22 +103,16 @@ def tag_name(tag: str) -> str:
     m = re.match(r"</?\s*([a-zA-Z0-9]+)", tag)
     return m.group(1).lower() if m else ""
 
-# Tags dont on traduit le contenu
 TRANSLATABLE_PARENTS = {
     "p","div","span","li","ul","ol","h1","h2","h3","h4","h5","h6","em","i","b","strong","small","sup","sub","blockquote","section","article","td","th","label","a"
 }
 
 def should_translate_text(open_stack: List[str]) -> bool:
-    # Si à l'intérieur d'un tag non textuel (script/style), on ne traduit pas
     if any(t in ("script","style","code","pre") for t in open_stack):
         return False
     return True
 
 def translate_preserving_emojis(text: str, translate_fn: Callable[[str], str], nbsp_token: str) -> str:
-    """
-    Traduit uniquement les runs non-emoji en préservant chaque emoji intact
-    + tous les espaces (y compris &nbsp;) qui suivent immédiatement l'emoji.
-    """
     out = []
     buf = []
     i = 0
@@ -139,7 +134,6 @@ def translate_preserving_emojis(text: str, translate_fn: Callable[[str], str], n
             flush_buf()
             out.append(ch)
             i += 1
-            # recoller les espaces suivant immédiatement l'emoji
             while i < L:
                 if text.startswith("&nbsp;", i):
                     out.append("&nbsp;")
@@ -154,14 +148,8 @@ def translate_preserving_emojis(text: str, translate_fn: Callable[[str], str], n
     flush_buf()
     return "".join(out)
 
-# >>> Préservation stricte des espaces et &nbsp; en bord de segment
 _WS_HTML_RE = re.compile(r'^((?:\s|&nbsp;)+)?(.*?)(?:((?:\s|&nbsp;)+))?$', re.DOTALL)
-
 def _split_leading_trailing_html_spaces(s: str):
-    """
-    Retourne (leading, core, trailing) où leading/trailing contiennent
-    exactement les espaces et &nbsp; d'origine.
-    """
     if not s:
         return "", "", ""
     m = _WS_HTML_RE.match(s)
@@ -169,7 +157,6 @@ def _split_leading_trailing_html_spaces(s: str):
         return "", s, ""
     return (m.group(1) or ""), (m.group(2) or ""), (m.group(3) or "")
 
-# --- STRIP <strong> ---
 STRONG_OPEN_RE  = re.compile(r"<\s*strong\b[^>]*>", flags=re.IGNORECASE)
 STRONG_CLOSE_RE = re.compile(r"<\s*/\s*strong\s*>", flags=re.IGNORECASE)
 def _strip_strong_tags(html: str) -> str:
@@ -181,23 +168,18 @@ def _strip_strong_tags(html: str) -> str:
 
 def translate_html_string(s: str, translate_fn: Callable[[str], str],
                           emoji_mode: str = "keep", strip_strong: bool = False) -> str:
-    # Retirer <strong>...</strong> avant traduction si demandé
     if strip_strong and s:
         s = _strip_strong_tags(s)
-
-    # Texte sans HTML
     if not s or ("<" not in s and ">" not in s):
         if not s:
             return s
         return translate_preserving_emojis(s, translate_fn, NBSP_TOKEN) if emoji_mode == "keep" else translate_fn(s)
-
     segs = split_html_preserve_tags(s)
     out, stack = [], []
     for seg in segs:
         if seg.startswith("<"):
             name = tag_name(seg)
             if seg.startswith("</"):
-                # fermeture
                 if stack and stack[-1] == name:
                     stack.pop()
                 else:
@@ -208,7 +190,6 @@ def translate_html_string(s: str, translate_fn: Callable[[str], str],
                             stack.pop()
                 out.append(seg)
             else:
-                # ouverture / selfclosing / commentaires
                 low = seg.lower()
                 if seg.endswith("/>") or low.startswith("<!--") or seg.startswith("<!"):
                     out.append(seg)
@@ -216,7 +197,6 @@ def translate_html_string(s: str, translate_fn: Callable[[str], str],
                     stack.append(name)
                     out.append(seg)
         else:
-            # Segment texte (hors tag) — préserver les espaces &nbsp; de bord
             if seg.strip() == "":
                 out.append(seg)
             else:
@@ -256,7 +236,7 @@ def _apply_case(target: str, mode: str) -> str:
     if mode == "lower": return target.lower()
     if mode == "capital": return target[:1].upper() + target[1:].lower() if target else target
     if mode == "title": return " ".join([w[:1].upper() + w[1:].lower() if w else w for w in target.split(" ")])
-    return target  # mixed → inchangé
+    return target
 
 def _load_glossary_from_file(path: str) -> Dict[str, str]:
     g = {}
@@ -270,7 +250,6 @@ def _load_glossary_from_file(path: str) -> Dict[str, str]:
                     if k and v:
                         g[str(k)] = str(v)
         else:
-            # format lignes "src=tgt"
             with io.open(path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -295,34 +274,17 @@ def _merge_glossary(g_file: Dict[str,str], g_pairs: List[str]) -> Dict[str,str]:
     return g
 
 def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode: str):
-    """
-    Force la traduction de certains termes :
-    - mode 'word' : correspondances à limites de mot
-    - mode 'substring' : partout
-    Respect de la casse détectée sur l'occurrence source.
-
-    Correctifs :
-    - Tokens ASCII stables __GLS0__
-    - Restauration ROBUSTE (tolère un underscore/espaces manquants)
-    - Ignore les paires dont la cible est vide
-    """
     if not glossary:
         return base_translate_fn
-
-    # Filtrer paires vides
     items_raw = [(str(k), str(v)) for k, v in glossary.items()]
     items_raw = [(k, v) for (k, v) in items_raw if v != ""]
     if not items_raw:
         return base_translate_fn
-
-    # Trier par longueur décroissante (évite recouvrements)
     items = sorted(items_raw, key=lambda kv: len(kv[0]), reverse=True)
     lut_lower = {k.lower(): v for k, v in items}
-
     escaped = [re.escape(src) for src, _ in items if src]
     if not escaped:
         return base_translate_fn
-
     if mode == "word":
         pattern = re.compile(
             r"(?<![\w])(" + "|".join(escaped) + r")(?![\w])",
@@ -334,14 +296,9 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
     def _make_token(i: int) -> str:
         return f"__GLS{i}__"
 
-    # ⚠️ Nouveau : on restaure par ID, avec pattern tolérant :
-    #   __GLS12__   (idéal)
-    #   __GLS12_    (un _ manquant)
-    #   _GLS12__    (un _ manquant au début)
-    #   __ GLS 12 __ (espaces insérés)
     restore_pat = re.compile(
         r"""
-        _{1,2}\s*GLS\s*(\d+)\s*_{1,2}     # tolère 1 ou 2 underscores et des espaces
+        _{1,2}\s*GLS\s*(\d+)\s*_{1,2}
         """,
         re.IGNORECASE | re.UNICODE | re.VERBOSE
     )
@@ -355,25 +312,17 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
             src_found = m.group(0)
             tgt_base = lut_lower.get(src_found.lower())
             if tgt_base is None:
-                # Sécurité : ne devrait pas arriver
                 return src_found
-
-            # Respect de la casse de l'occurrence source
             case_mode = _detect_case(src_found)
             tgt_final = _apply_case(tgt_base, case_mode)
-
             token = _make_token(idx)
             id2tgt[idx] = tgt_final
             idx += 1
             return token
 
-        # 1) Protéger les occurrences
         protected = pattern.sub(_repl, text)
-
-        # 2) Traduire le reste
         translated = base_translate_fn(protected)
 
-        # 3) Restauration par ID (robuste aux petites altérations)
         if id2tgt:
             def _restore(m: re.Match) -> str:
                 num = m.group(1)
@@ -382,7 +331,6 @@ def make_glossary_translate_fn(base_translate_fn, glossary: Dict[str, str], mode
                     return id2tgt.get(i, m.group(0))
                 except Exception:
                     return m.group(0)
-
             translated = restore_pat.sub(_restore, translated)
 
         return translated
@@ -401,6 +349,25 @@ def _print_progress(i: int, n: int, width: int = 30):
 
 def _end_progress():
     sys.stderr.write("\n"); sys.stderr.flush()
+
+# ---------- Helpers attributs ----------
+# Prefixes meta considérés comme "attributs"
+ATTRIBUTE_META_PREFIXES = ("_attribute", "alpc_attr_", "ic_attr_", "attribute_")
+
+_NUM_UNIT_RE = re.compile(
+    r'^\s*([+-]?\d+(?:[.,]\d+)?)\s*([%°A-Za-zµΩohmHzVWAJNs\/\-\^″]+)?\s*$',
+    re.UNICODE
+)
+
+def _looks_numeric_with_unit(val: str) -> bool:
+    """True si la valeur ressemble à un nombre éventuellement suivi d'une unité (ex: 110 V, 55″, 60 Hz, 20 %, 12.5 kg)."""
+    if not isinstance(val, str):
+        return False
+    return _NUM_UNIT_RE.match(val.strip()) is not None
+
+def _is_attribute_meta_key(key: str) -> bool:
+    if not isinstance(key, str): return False
+    return key.startswith(ATTRIBUTE_META_PREFIXES)
 
 # ---------- Translation of one product ----------
 def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, Any]:
@@ -433,6 +400,16 @@ def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, 
         meta["_yoast_wpseo_focuskw"] = translate_fn(meta["_yoast_wpseo_focuskw"])
     if "_yoast_wpseo_keywordsynonyms" in meta and meta["_yoast_wpseo_keywordsynonyms"] is not None:
         meta["_yoast_wpseo_keywordsynonyms"] = translate_fn(meta["_yoast_wpseo_keywordsynonyms"])
+
+    # ✅ Traduction des attributs en meta
+    for k, v in list(meta.items()):
+        if not isinstance(v, str):
+            continue
+        if _is_attribute_meta_key(k):
+            # Ne pas traduire si valeur purement numérique / numérique+unité
+            if not _looks_numeric_with_unit(v):
+                meta[k] = translate_fn(v)
+
     out["meta"] = meta
 
     # Language & taxonomy
@@ -441,6 +418,18 @@ def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, 
     target_name = getattr(options, "target_name", None) or getattr(options, "target", None)
     if target_name:
         tax["language"] = [target_name]
+
+    # ✅ Traduction des noms côté taxonomie des attributs (ex: al_product-attributes)
+    for tax_name, terms in list(tax.items()):
+        try:
+            if isinstance(tax_name, str) and "attributes" in tax_name and isinstance(terms, list):
+                for t in terms:
+                    if isinstance(t, dict) and "name" in t and isinstance(t["name"], str) and t["name"]:
+                        # Traduit le "name" du terme ; on laisse id/slug intacts (mapping côté import)
+                        t["name"] = translate_fn(t["name"])
+        except Exception:
+            pass
+
     out["tax"] = tax
 
     # IDs
