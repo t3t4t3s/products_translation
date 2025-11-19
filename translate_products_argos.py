@@ -26,7 +26,7 @@ Entrée:  JSON (array) avec des objets type:
 Sortie: même structure, avec champs traduits et options appliquées.
 """
 
-import argparse, json, io, re, sys, unicodedata
+import argparse, json, io, re, sys, unicodedata, os
 from typing import Any, Dict, List, Callable
 
 # ---------- Argos Translate ----------
@@ -351,6 +351,35 @@ def _end_progress():
     sys.stderr.write("\n"); sys.stderr.flush()
 
 # ---------- Helpers attributs ----------
+
+# Détecte la clé META correspondant à "TYPE"
+def _is_type_key(k: str) -> bool:
+    kl = (k or "").lower().strip()
+    # tes exports utilisent généralement _attribute3 pour TYPE
+    if kl in {"_attribute3", "attribute3", "_attribute_3", "attribute_3"}:
+        return True
+    # tolérance sur les libellés éventuels
+    return any(h in kl for h in ("type", "catégorie", "categoria", "category"))
+
+def _is_attr_key_copy_raw(k: str) -> bool:
+    """
+    Ces clés d'attributs doivent être COPIÉES telles quelles (pas traduites),
+    tout en étant bien présentes dans le JSON de sortie.
+    Couvre MARQUE/Brand (_attribute1) et TENSION/Voltage (_attribute2).
+    """
+    kl = (k or "").lower()
+
+    # Conventions les plus courantes dans ton export
+    RAW_EXACT = {
+        "_attribute1", "attribute1", "_attribute_1", "attribute_1",  # MARQUE / BRAND
+        "_attribute2", "attribute2", "_attribute_2", "attribute_2",  # TENSION / VOLTAGE
+    }
+    RAW_HINTS = {"marque", "brand", "tension", "voltage"}
+
+    if kl in RAW_EXACT:
+        return True
+    return any(h in kl for h in RAW_HINTS)
+
 # Prefixes meta considérés comme "attributs"
 ATTRIBUTE_META_PREFIXES = ("_attribute", "alpc_attr_", "ic_attr_", "attribute_")
 
@@ -368,6 +397,78 @@ def _looks_numeric_with_unit(val: str) -> bool:
 def _is_attribute_meta_key(key: str) -> bool:
     if not isinstance(key, str): return False
     return key.startswith(ATTRIBUTE_META_PREFIXES)
+
+# Table par défaut (vide). On la surchargera par fichier JSON externe s’il existe.
+TYPE_GLOSSARY = {}  # dict keyed by (src_lang, tgt_lang) -> { "fr_val": "en_val", ... }
+
+def _load_type_glossary_override():
+    """
+    Charge 'type_glossary.json' s'il est présent à côté du script.
+    Format attendu :
+    {
+      "fr->en": { "lave-linge": "Washing machine", ... },
+      "en->es": { "washing machine": "Lavadora", ... }
+    }
+    """
+    path = os.path.join(os.path.dirname(__file__), "type_glossary.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        out = {}
+        for k, mp in raw.items():
+            if not isinstance(mp, dict) or "->" not in k:
+                continue
+            src, tgt = k.split("->", 1)
+            out[(src.strip().lower(), tgt.strip().lower())] = mp
+        return out
+    except Exception:
+        return {}
+
+def apply_type_glossary(value: str, src_lang: str, tgt_lang: str, translate_fn):
+    """
+    1) Essaie le glossaire TYPE (match exact insensible à la casse,
+       puis remplacements contextuels).
+    2) Si rien trouvé, fallback vers translate_fn(value).
+    """
+    if not value:
+        return value
+
+    key = (str(src_lang or "").lower(), str(tgt_lang or "").lower())
+    table = TYPE_GLOSSARY.get(key, {}) or {}
+    v = value
+
+    # a) Match exact (ignorer casse)
+    for src, dst in table.items():
+        if v.lower() == str(src).lower():
+            return dst
+
+    # b) Remplacements contextuels (mots/expressions)
+    changed = False
+    for src, dst in table.items():
+        src = str(src)
+        dst = str(dst)
+        # mot entier
+        pattern = r"\b" + re.escape(src) + r"\b"
+        if re.search(pattern, v, flags=re.IGNORECASE):
+            v2 = re.sub(pattern, dst, v, flags=re.IGNORECASE)
+            if v2 != v:
+                v = v2
+                changed = True
+        else:
+            # sinon occurrence générale
+            v2 = re.sub(re.escape(src), dst, v, flags=re.IGNORECASE)
+            if v2 != v:
+                v = v2
+                changed = True
+
+    if changed:
+        return v
+
+    # c) Fallback MT si aucune règle n'a matché
+    return translate_fn(v)
+
 
 # ---------- Translation of one product ----------
 def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, Any]:
@@ -402,13 +503,28 @@ def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, 
         meta["_yoast_wpseo_keywordsynonyms"] = translate_fn(meta["_yoast_wpseo_keywordsynonyms"])
 
     # ✅ Traduction des attributs en meta
+    src = options.source  # "fr" -> première passe
+    tgt = options.target  # "en" puis plus tard "es" sur le JSON en entrée
+
     for k, v in list(meta.items()):
-        if not isinstance(v, str):
+        # 1) MARQUE/TENSION : COPIE telle quelle (pas de traduction)
+        if _is_attr_key_copy_raw(k):
+            meta[k] = v if v is not None else ""
             continue
-        if _is_attribute_meta_key(k):
-            # Ne pas traduire si valeur purement numérique / numérique+unité
+
+        # 2) TYPE : glossaire externe + fallback Argos
+        if _is_type_key(k) and isinstance(v, str):
             if not _looks_numeric_with_unit(v):
-                meta[k] = translate_fn(v)
+                meta[k] = apply_type_glossary(v, src, tgt, translate_fn)
+            else:
+                meta[k] = v
+            continue
+
+        # 3) Autres clés META : ton comportement existant (si tu traduis d'autres metas)
+        #    Évite de traduire si valeur strictement numérique/unité
+        if isinstance(v, str) and not _looks_numeric_with_unit(v):
+            # si tu as déjà une logique HTML-safe, conserve-la ici
+            meta[k] = translate_fn(v)
 
     out["meta"] = meta
 
@@ -420,15 +536,16 @@ def translate_product(prod: Dict[str, Any], translate_fn, options) -> Dict[str, 
         tax["language"] = [target_name]
 
     # ✅ Traduction des noms côté taxonomie des attributs (ex: al_product-attributes)
-    for tax_name, terms in list(tax.items()):
-        try:
-            if isinstance(tax_name, str) and "attributes" in tax_name and isinstance(terms, list):
-                for t in terms:
-                    if isinstance(t, dict) and "name" in t and isinstance(t["name"], str) and t["name"]:
-                        # Traduit le "name" du terme ; on laisse id/slug intacts (mapping côté import)
-                        t["name"] = translate_fn(t["name"])
-        except Exception:
-            pass
+    # Désactivé par défaut. On ne veut pas toucher aux labels (Polylang gère les étiquettes).
+    if getattr(options, "translate_attr_labels", False):
+        for tax_name, terms in list(tax.items()):
+            try:
+                if isinstance(tax_name, str) and "attributes" in tax_name and isinstance(terms, list):
+                    for t in terms:
+                        if isinstance(t, dict) and "name" in t and isinstance(t["name"], str) and t["name"]:
+                            t["name"] = translate_fn(t["name"])
+            except Exception:
+                pass
 
     out["tax"] = tax
 
@@ -464,6 +581,10 @@ def main():
     p.add_argument("--glossary-mode", choices=["word", "substring"], default="word", help="Correspondance 'word' (délimitée) ou 'substring'.")
     p.add_argument("--progress", choices=["auto", "none"], default="auto", help="Barre de progression sur stderr.")
 
+    p.add_argument("--translate-attr-labels", action="store_true",
+               help="(désactivé par défaut) Traduire les labels des termes de la taxonomie d'attributs.")
+
+
     args = p.parse_args()
 
     # Build translator
@@ -473,6 +594,14 @@ def main():
     g_file = _load_glossary_from_file(args.glossary_file)
     glossary = _merge_glossary(g_file, args.glossary_pair)
     translate_fn = make_glossary_translate_fn(translate_fn, glossary, args.glossary_mode)
+
+    # surcharge facultative depuis type_glossary.json (aucun nouvel argument CLI)
+    _override = _load_type_glossary_override()
+    if _override:
+        for key, mapping in _override.items():
+            base = TYPE_GLOSSARY.get(key, {})
+            base.update(mapping)
+            TYPE_GLOSSARY[key] = base
 
     # Load JSON
     with io.open(args.input, "r", encoding="utf-8") as f:

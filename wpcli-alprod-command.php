@@ -6,6 +6,8 @@ class AL_Product_Importer_Command {
     private $language_tax    = 'language';
     private $source_id_key   = '_source_id';
     private $allowed_status  = [ 'publish','draft','pending','private','future' ];
+    private $current_row_meta = [];
+
 
 
     /**
@@ -45,161 +47,660 @@ class AL_Product_Importer_Command {
         else if ($debug) WP_CLI::log("[TAX] Set {$tax} on #{$post_id} ids=".json_encode($valid));
     }
 
-    /**
-     * Assigne la taxo des attributs (al_product-attributes)
-     * 1) Priorité aux IDs explicites al_product-attributes_ids[lang]
-     * 2) Sinon map via tax.al_product-attributes (ids FR) -> pll_get_term(..., lang)
-     */
-    private function assign_attributes_from_row( int $post_id, array $row, string $lang, bool $debug = false ): void {
-        $tax = 'al_product-attributes';
+    // Crée/récupère un "label" (parent) par langue (EN/ES) dans la taxo d'attributs
+    private function ensure_label_term(string $tax, string $label, string $lang, bool $debug=false): int {
+        $label = trim($label);
+        if ($label === '') return 0;
 
+        $lang = $this->normalize_lang_code($lang);
+        $slug = sanitize_title($label) . '-' . $lang;
+
+        // 1) chercher par slug exact
+        $found = get_terms([
+            'taxonomy'   => $tax,
+            'hide_empty' => false,
+            'slug'       => $slug,
+            'number'     => 1,
+        ]);
+        if (!is_wp_error($found) && !empty($found)) {
+            $tid = (int)$found[0]->term_id;
+            if ($found[0]->name !== $label) wp_update_term($tid, $tax, ['name'=>$label]);
+            if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+            if ($debug) WP_CLI::log("[ATTR-LABEL] reuse {$tax}#{$tid} '{$label}' ({$lang})");
+            return $tid;
+        }
+
+        // 2) créer si absent
+        $ins = wp_insert_term($label, $tax, ['slug'=>$slug]);
+        if (is_wp_error($ins)) {
+            if ($debug) WP_CLI::warning("[ATTR-LABEL] cannot create '{$label}': ".$ins->get_error_message());
+            return 0;
+        }
+        $tid = (int)$ins['term_id'];
+        if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+        if ($debug) WP_CLI::log("[ATTR-LABEL] created {$tax}#{$tid} '{$label}' ({$lang})");
+        return $tid;
+    }
+
+    // Crée/récupère une "valeur" enfant sous un label donné
+    private function ensure_child_term(string $tax, int $parent_id, string $value, string $lang, bool $debug=false): int {
+        $value = trim($value);
+        if ($value === '' || $parent_id <= 0) return 0;
+
+        $lang = $this->normalize_lang_code($lang);
+        $slug = sanitize_title($value) . '-' . $lang;
+
+        // 1) chercher par slug exact
+        $found = get_terms([
+            'taxonomy'   => $tax,
+            'hide_empty' => false,
+            'slug'       => $slug,
+            'number'     => 1,
+        ]);
+        if (!is_wp_error($found) && !empty($found)) {
+            $tid = (int)$found[0]->term_id;
+            // s'assurer du parent
+            if ((int)$found[0]->parent !== $parent_id) {
+                wp_update_term($tid, $tax, ['parent'=>$parent_id]);
+            }
+            if ($found[0]->name !== $value) wp_update_term($tid, $tax, ['name'=>$value]);
+            if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+            if ($debug) WP_CLI::log("[ATTR-VALUE] reuse {$tax}#{$tid} '{$value}' -> parent#{$parent_id} ({$lang})");
+            return $tid;
+        }
+
+        // 2) créer si absent
+        $ins = wp_insert_term($value, $tax, ['slug'=>$slug, 'parent'=>$parent_id]);
+        if (is_wp_error($ins)) {
+            if ($debug) WP_CLI::warning("[ATTR-VALUE] cannot create '{$value}': ".$ins->get_error_message());
+            return 0;
+        }
+        $tid = (int)$ins['term_id'];
+        if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+        if ($debug) WP_CLI::log("[ATTR-VALUE] created {$tax}#{$tid} '{$value}' -> parent#{$parent_id} ({$lang})");
+        return $tid;
+    }
+
+    // Crée (ou retrouve) un terme par NOM en forçant la langue cible. Slug suffixé -{lang}
+    private function ensure_term_by_name_lang( string $tax, string $name, string $lang, string $slug_hint = '' ) : int {
+        $name = trim((string)$name);
+        if ($name === '') return 0;
+
+        $lang = $this->normalize_lang_code($lang);
+        $slug_base = $slug_hint !== '' ? sanitize_title($slug_hint) : sanitize_title($name);
+        $slug      = $slug_base . '-' . $lang;
+
+        // 1) par slug exact
+        $found = get_terms([
+            'taxonomy'   => $tax,
+            'hide_empty' => false,
+            'slug'       => $slug,
+            'number'     => 1,
+        ]);
+        if (!is_wp_error($found) && !empty($found)) {
+            $tid = (int)$found[0]->term_id;
+            if ($found[0]->name !== $name) wp_update_term($tid, $tax, ['name'=>$name]);
+            if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+            return $tid;
+        }
+
+        // 2) sinon crée
+        $ins = wp_insert_term($name, $tax, ['slug'=>$slug]);
+        if (is_wp_error($ins)) {
+            // dernier recours: recherche "par nom"
+            $by_name = get_terms([
+                'taxonomy'   => $tax,
+                'hide_empty' => false,
+                'search'     => $name,
+                'number'     => 1,
+            ]);
+            if (!is_wp_error($by_name) && !empty($by_name)) {
+                $tid = (int)$by_name[0]->term_id;
+                if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+                return $tid;
+            }
+            return 0;
+        }
+
+        $tid = (int)$ins['term_id'];
+        if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+        return $tid;
+    }
+
+    /**
+     * Assigne UNIQUEMENT les valeurs d’attributs depuis les métas _attribute1..3,
+     * sans modifier les labels (parents). Les parents existent et sont traduits via Polylang.
+     * Conventions parents FR en MAJ: MARQUE / TENSION / TYPE
+     * Mapping des labels cibles:
+     *  EN: MARQUE->BRAND, TENSION->VOLTAGE, TYPE->CATEGORY
+     *  ES: MARQUE->MARCA, TENSION->TENSIÓN, TYPE->TIPO
+     */
+    private function assign_attribute_values_only_from_meta( int $post_id, string $lang, bool $debug = false ): void {
+        $lang = strtolower(trim($lang));
+        if ($lang === '' || $lang === 'fr') {
+            if ($debug) WP_CLI::log("[ATTR:values] FR/empty -> skip (on ne modifie pas FR).");
+            return;
+        }
+
+        $tax = 'al_product-attributes';
+        if (!taxonomy_exists($tax)) {
+            if ($debug) WP_CLI::warning("[ATTR:values] taxonomy {$tax} inexistante");
+            return;
+        }
+
+        // Parents FR canoniques (MAJ)
+        $parents_fr = ['MARQUE','TENSION','TYPE'];
+
+        // Mapping des noms de labels cibles (par nom FR)
+        $label_map = [
+            'en' => ['MARQUE'=>'BRAND',   'TENSION'=>'VOLTAGE', 'TYPE'=>'CATEGORY'],
+            'es' => ['MARQUE'=>'MARCA',   'TENSION'=>'TENSIÓN', 'TYPE'=>'TIPO'],
+        ];
+        if (!isset($label_map[$lang])) {
+            if ($debug) WP_CLI::log("[ATTR:values] Langue non gérée: {$lang}");
+            return;
+        }
+        $target_labels = $label_map[$lang];
+
+        // Valeurs (déjà traduites dans les JSON importés)
+        $v1 = trim((string)get_post_meta($post_id, '_attribute1', true)); // MARQUE
+        $v2 = trim((string)get_post_meta($post_id, '_attribute2', true)); // TENSION
+        $v3 = trim((string)get_post_meta($post_id, '_attribute3', true)); // TYPE
+        if ($v1==='' && $v2==='' && $v3==='') {
+            if ($debug) WP_CLI::log("[ATTR:values] Aucune valeur _attributeN.");
+            return;
+        }
+
+        // util: égalité insensible aux accents/casse/espaces
+        $eq = function($a,$b) {
+            $na = remove_accents(strtolower(trim((string)$a)));
+            $nb = remove_accents(strtolower(trim((string)$b)));
+            return $na === $nb;
+        };
+
+        // Trouver un terme parent par NOM (exact logique, parent=0)
+        $find_parent_by_name = function(string $name) use ($tax, $eq) {
+            $terms = get_terms([
+                'taxonomy'   => $tax,
+                'hide_empty' => false,
+                'number'     => 400,
+                'parent'     => 0,
+            ]);
+            if (is_wp_error($terms) || empty($terms)) return 0;
+            foreach ($terms as $t) {
+                if ((int)$t->parent !== 0) continue;
+                if ($eq($t->name, $name)) return (int)$t->term_id;
+            }
+            return 0;
+        };
+
+        // Résoudre le parent cible à partir du parent FR (par NOM) puis Polylang, sinon par NOM cible direct
+        $resolve_parent = function(string $fr_name, string $target_name, string $lang) use ($tax, $find_parent_by_name, $debug) {
+            // 1) trouver parent FR par NOM
+            $fr_tid = $find_parent_by_name($fr_name);
+            if ($fr_tid && function_exists('pll_get_term')) {
+                $mapped = pll_get_term($fr_tid, $lang);
+                if ($mapped) return (int)$mapped;
+            }
+            // 2) sinon trouver parent cible par NOM direct
+            $to_tid = $find_parent_by_name($target_name);
+            if ($to_tid) return (int)$to_tid;
+
+            // 3) fallback (optionnel) : ne pas créer automatiquement un parent
+            return 0;
+        };
+
+        // Résoudre les 3 parents
+        $parent_ids = [
+            'MARQUE'  => $resolve_parent('MARQUE',  $target_labels['MARQUE'],  $lang),
+            'TENSION' => $resolve_parent('TENSION', $target_labels['TENSION'], $lang),
+            'TYPE'    => $resolve_parent('TYPE',    $target_labels['TYPE'],    $lang),
+        ];
+        if ($debug) WP_CLI::log("[ATTR:values] parents: ".json_encode($parent_ids));
+
+        // Créer/trouver une valeur sous un parent (sans toucher au label)
+        $ensure_value_under_parent = function(string $value, int $parent_id) use ($tax) {
+            $value = trim($value);
+            if ($value === '' || !$parent_id) return 0;
+
+            $slug = sanitize_title($value);
+
+            // Par slug + parent
+            $terms = get_terms([
+                'taxonomy'   => $tax,
+                'hide_empty' => false,
+                'slug'       => $slug,
+                'number'     => 20,
+            ]);
+            if (!is_wp_error($terms) && !empty($terms)) {
+                foreach ($terms as $t) {
+                    if ((int)$t->parent === $parent_id) return (int)$t->term_id;
+                }
+            }
+
+            // Par name + parent
+            $terms = get_terms([
+                'taxonomy'   => $tax,
+                'hide_empty' => false,
+                'name'       => $value,
+                'number'     => 20,
+            ]);
+            if (!is_wp_error($terms) && !empty($terms)) {
+                foreach ($terms as $t) {
+                    if ((int)$t->parent === $parent_id) return (int)$t->term_id;
+                }
+            }
+
+            // Créer sous le parent
+            $ins = wp_insert_term($value, $tax, ['slug'=>$slug, 'parent'=>$parent_id]);
+            if (is_wp_error($ins)) return 0;
+            return (int)$ins['term_id'];
+        };
+
+        // Construire la liste d’IDs valeurs à assigner
+        $value_ids = [];
+        if ($v1 !== '' && $parent_ids['MARQUE'])  $value_ids[] = $ensure_value_under_parent($v1, $parent_ids['MARQUE']);
+        if ($v2 !== '' && $parent_ids['TENSION']) $value_ids[] = $ensure_value_under_parent($v2, $parent_ids['TENSION']);
+        if ($v3 !== '' && $parent_ids['TYPE'])    $value_ids[] = $ensure_value_under_parent($v3, $parent_ids['TYPE']);
+        $value_ids = array_values(array_filter(array_unique($value_ids)));
+
+        if (empty($value_ids)) {
+            if ($debug) WP_CLI::log("[ATTR:values] Rien à assigner (parents introuvables ou valeurs vides).");
+            return;
+        }
+
+        $res = wp_set_object_terms($post_id, $value_ids, $tax, false);
+        if (is_wp_error($res)) {
+            WP_CLI::warning("[ATTR:values] Erreur assignation sur #{$post_id}: ".$res->get_error_message());
+        } else {
+            if ($debug) WP_CLI::log("[ATTR:values] Set {$tax} on #{$post_id} values=".json_encode($value_ids));
+        }
+    }
+
+    /**
+     * Injecte les attributs depuis le bloc meta du JSON :
+     *   - _attribute1, _attribute2, _attribute3 (valeurs)
+     *   - _attribute1_label, _attribute2_label, _attribute3_label (labels)
+     * On ne touche PAS au FR ; on force les labels pour EN/ES uniquement.
+     */
+    private function assign_attributes_from_meta_simple( int $post_id, array $row_meta, string $lang, bool $debug = false ) : void {
+        $lang = $this->normalize_lang_code($lang);
+
+        // Récup des valeurs
+        $v1 = isset($row_meta['_attribute1']) ? trim((string)$row_meta['_attribute1']) : '';
+        $v2 = isset($row_meta['_attribute2']) ? trim((string)$row_meta['_attribute2']) : '';
+        $v3 = isset($row_meta['_attribute3']) ? trim((string)$row_meta['_attribute3']) : '';
+
+        if ($debug) WP_CLI::log("[ATTR-META-SIMPLE] lang={$lang} raw values: '{$v1}', '{$v2}', '{$v3}'");
+
+        // Rien à faire si aucune valeur
+        if ($v1 === '' && $v2 === '' && $v3 === '') {
+            if ($debug) WP_CLI::log("[ATTR-META-SIMPLE] empty => clearing labels only");
+            // On nettoie les labels pour éviter des résidus incohérents
+            delete_post_meta($post_id, '_attribute1_label');
+            delete_post_meta($post_id, '_attribute2_label');
+            delete_post_meta($post_id, '_attribute3_label');
+            return;
+        }
+
+        // Labels selon la langue (on ne touche pas FR)
+        $labels_map = [
+            'fr' => ['Marque','Tension','Type'],   // FR inchangé
+            'en' => ['Brand','Voltage','Type'],
+            'es' => ['Marca','Tensión','Tipo'],
+        ];
+        $labels = $labels_map[$lang] ?? $labels_map['en'];
+
+        // FR : on conserve ce que tu as déjà ; EN/ES : on force ces labels
+        if ($lang === 'fr') {
+            // FR : si ton JSON a déjà *_label on les laisse tels quels ; sinon on ne change rien
+            if ($debug) WP_CLI::log("[ATTR-META-SIMPLE] FR: no label override (safety).");
+        } else {
+            // EN/ES : pose/override des labels
+            update_post_meta($post_id, '_attribute1_label', $labels[0]);
+            update_post_meta($post_id, '_attribute2_label', $labels[1]);
+            update_post_meta($post_id, '_attribute3_label', $labels[2]);
+            if ($debug) WP_CLI::log("[ATTR-META-SIMPLE] labels set: ".implode(', ', $labels));
+        }
+
+        // Pose des valeurs (vides inclus -> on nettoie)
+        $pairs = [
+            ['_attribute1', $v1],
+            ['_attribute2', $v2],
+            ['_attribute3', $v3],
+        ];
+        foreach ($pairs as [$k, $val]) {
+            if ($val === '') {
+                delete_post_meta($post_id, $k);
+            } else {
+                update_post_meta($post_id, $k, $val);
+            }
+        }
+
+        // Important : certains thèmes lisent uniquement les métas ; on peut aussi nettoyer la taxo
+        // pour éviter les incohérences (facultatif). Décommente si besoin :
+        if (taxonomy_exists('al_product-attributes')) {
+            wp_set_object_terms($post_id, [], 'al_product-attributes', false);
+        }
+
+        if ($debug) {
+            WP_CLI::log("[ATTR-META-SIMPLE] set metas for #{$post_id}: "
+                ."_attribute1='{$v1}', _attribute2='{$v2}', _attribute3='{$v3}'");
+        }
+    }
+
+
+    // Lit _attribute1..3 dans $row['meta'] (fallback BDD), pose les labels selon la langue,
+    // crée/trouve les termes "valeur" en langue cible et les assigne au produit.
+    private function assign_attributes_from_meta( int $post_id, string $lang, bool $debug = false ) : void {
+        $tax  = 'al_product-attributes';
+        if (!taxonomy_exists($tax)) {
+            if ($debug) WP_CLI::warning("[ATTR-META] Taxonomy '{$tax}' inexistante");
+            return;
+        }
+
+        $lang = $this->normalize_lang_code($lang);
+
+        // Lire les metas de la rangée JSON (stashée dans la boucle)
+        $row_meta = is_array($this->current_row_meta ?? null) ? $this->current_row_meta : [];
+
+        // Récupérer les 3 valeurs (_attribute1..3)
+        $vals = [];
+        for ($i=1;$i<=3;$i++) {
+            $k = "_attribute{$i}";
+            $v = isset($row_meta[$k]) ? trim((string)$row_meta[$k]) : '';
+            if ($debug) WP_CLI::log("[ATTR-META] {$k}='{$v}' (lang={$lang})");
+            if ($v !== '') $vals[] = $v;
+        }
+
+        // Pas de valeurs -> désassigner
+        if (empty($vals)) {
+            if ($debug) WP_CLI::log("[ATTR-META] aucune valeur -> clear taxonomy");
+            wp_set_object_terms($post_id, [], $tax, false);
+            return;
+        }
+
+        // Poser aussi les labels en meta pour les thèmes qui les lisent
+        $labels_map = [
+            'fr' => ['Marque','Tension','Type'],
+            'en' => ['Brand','Voltage','Type'],
+            'es' => ['Marca','Tensión','Tipo'],
+        ];
+        $labels = $labels_map[$lang] ?? $labels_map['en'];
+        for ($i=1;$i<=3;$i++) {
+            $labk = "_attribute{$i}_label";
+            $valk = "_attribute{$i}";
+            if (!empty($row_meta[$valk])) {
+                update_post_meta($post_id, $labk, $labels[$i-1]);
+                update_post_meta($post_id, $valk, $row_meta[$valk]);
+            } else {
+                delete_post_meta($post_id, $labk);
+            }
+        }
+
+        // *** FR : on ne change rien (comportement existant, valeurs "plates") ***
+        if ($lang === 'fr') {
+            // création/assignation de valeurs "plates" (comme avant)
+            $value_ids = [];
+            foreach ($vals as $v) {
+                // réutilise éventuellement ta ensure_term_by_name_lang existante
+                $tid = $this->ensure_term_by_name_lang($tax, $v, $lang, $v);
+                if ($tid) $value_ids[] = $tid;
+            }
+            $value_ids = array_values(array_unique(array_filter($value_ids, static fn($x)=>$x>0)));
+            if ($debug) WP_CLI::log("[ATTR-META][FR] ids=".json_encode($value_ids));
+            if (!empty($value_ids)) wp_set_object_terms($post_id, $value_ids, $tax, false);
+            else wp_set_object_terms($post_id, [], $tax, false);
+            return;
+        }
+
+        // *** EN/ES : structure Label(parent) -> Valeur(enfant) ***
+        $pairing = [
+            ['label'=>$labels[0] ?? 'Brand',  'value'=>($row_meta['_attribute1'] ?? '')],
+            ['label'=>$labels[1] ?? 'Voltage','value'=>($row_meta['_attribute2'] ?? '')],
+            ['label'=>$labels[2] ?? 'Type',   'value'=>($row_meta['_attribute3'] ?? '')],
+        ];
+
+        $final_ids = [];
+        foreach ($pairing as $idx=>$pair) {
+            $label = trim((string)$pair['label']);
+            $value = trim((string)$pair['value']);
+            if ($value === '') continue;
+
+            $parent = $this->ensure_label_term($tax, $label, $lang, $debug);
+            if ($parent <= 0) {
+                if ($debug) WP_CLI::warning("[ATTR-META] label term missing for '{$label}' ({$lang})");
+                // fallback: valeur "plate"
+                $tid = $this->ensure_term_by_name_lang($tax, $value, $lang, $value);
+            } else {
+                $tid = $this->ensure_child_term($tax, $parent, $value, $lang, $debug);
+                if ($tid <= 0) {
+                    // fallback "plate"
+                    $tid = $this->ensure_term_by_name_lang($tax, $value, $lang, $value);
+                }
+            }
+            if ($tid) $final_ids[] = $tid;
+        }
+
+        $final_ids = array_values(array_unique(array_filter($final_ids, static fn($x)=>$x>0)));
+        if ($debug) WP_CLI::log("[ATTR-META][{$lang}] set ids=".json_encode($final_ids)." -> #{$post_id}");
+        if (!empty($final_ids)) wp_set_object_terms($post_id, $final_ids, $tax, false);
+        else wp_set_object_terms($post_id, [], $tax, false);
+    }
+
+    /**
+     * Assigne les attributs (taxonomy 'al_product-attributes') de façon SIMPLE :
+     * - on lit $row['tax']['al_product-attributes'] (déjà traduits par ton JSON EN)
+     * - on cherche par slug; sinon on crée le terme avec le name fourni
+     * - on pose la langue si Polylang est présent (sans lier aux autres langues)
+     * - on assigne les IDs obtenus au produit
+     */
+    private function assign_attributes_simple( int $post_id, array $row, string $lang, bool $debug = false ): void {
+        $tax = 'al_product-attributes';
         if (!taxonomy_exists($tax)) {
             if ($debug) WP_CLI::warning("[ATTR] Taxonomy '{$tax}' inexistante, skip.");
             return;
         }
+        // normalise langue pour la pose éventuelle
+        $lang = $this->normalize_lang_code($lang);
 
-        if (function_exists('normalize_lang_code')) $lang = normalize_lang_code($lang);
-        else $lang = strtolower(trim((string)$lang));
-
-        // ---- 0) Si le JSON fournit déjà des IDs par langue, on les utilise tels quels
-        $ids_key = $tax . '_ids'; // ex: al_product-attributes_ids
-        if (!empty($row[$ids_key]) && is_array($row[$ids_key]) && !empty($row[$ids_key][$lang])) {
-            $ids = array_values(array_filter(array_map('intval', (array)$row[$ids_key][$lang]), static fn($v)=>$v>0));
-            $valid = [];
-            foreach ($ids as $tid) {
-                $t = get_term($tid, $tax);
-                if ($t && !is_wp_error($t)) $valid[] = $tid;
-            }
-            if (!empty($valid)) {
-                $res = wp_set_object_terms($post_id, $valid, $tax, false);
-                if (is_wp_error($res)) WP_CLI::warning("[ATTR] Erreur assignation {$tax} sur #{$post_id}: ".$res->get_error_message());
-                elseif ($debug) WP_CLI::log("[ATTR] Set {$tax} on #{$post_id} ids=".json_encode($valid));
-                return;
-            }
-            if ($debug) WP_CLI::log("[ATTR] {$ids_key}[{$lang}] fourni mais aucun ID valide; on tente les fallbacks.");
-        }
-
-        // ---- 1) Récup FR depuis le JSON (tax.al_product-attributes : objets {id,slug,name})
-        $fr_terms = [];
-        if (!empty($row['tax'][$tax]) && is_array($row['tax'][$tax])) {
-            foreach ($row['tax'][$tax] as $t) {
-                if (!is_array($t)) continue;
-                $fr_terms[] = [
-                    'id'   => isset($t['id'])   ? (int)$t['id']   : 0,
-                    'slug' => isset($t['slug']) ? (string)$t['slug'] : '',
-                    'name' => isset($t['name']) ? (string)$t['name'] : '',
-                ];
-            }
-        }
-        if ($debug) WP_CLI::log("[ATTR] Fallback via tax.{$tax} FR terms=".json_encode($fr_terms));
-
-        if (empty($fr_terms)) {
-            if ($debug) WP_CLI::log("[ATTR] Aucun terme FR dans le payload; rien à faire.");
+        // attend un tableau d’objets {id, slug, name} déjà TRADUITS côté JSON EN
+        if (empty($row['tax'][$tax]) || !is_array($row['tax'][$tax])) {
+            if ($debug) WP_CLI::log("[ATTR] Pas de bloc tax.{$tax} dans le payload, skip.");
             return;
         }
 
-        // ---- 2) Pour chaque terme FR, on recherche sa contrepartie EN/ES :
-        //         a) via pll_get_term(fr_id, lang)
-        //         b) sinon par slug (ou name) dans la langue cible
-        //         c) sinon on CRÉE le terme (lang), on le relie au FR via Polylang, puis on l’utilise
         $target_ids = [];
+        foreach ($row['tax'][$tax] as $t) {
+            if (!is_array($t)) continue;
+            $slug = isset($t['slug']) ? sanitize_title((string)$t['slug']) : '';
+            $name = isset($t['name']) ? trim((string)$t['name']) : '';
 
-        foreach ($fr_terms as $fr) {
-            $fr_id = $fr['id'] ?? 0;
-            $slug  = $fr['slug'] ?? '';
-            $name  = $fr['name'] ?? '';
+            if ($slug === '' && $name === '') continue;
 
-            $target_id = 0;
-
-            // a) mapping Polylang direct
-            if ($fr_id && function_exists('pll_get_term')) {
-                $mapped = pll_get_term($fr_id, $lang);
-                if ($mapped) {
-                    $target_id = (int)$mapped;
-                    if ($debug) WP_CLI::log("[ATTR] pll_get_term ok: FR#{$fr_id} -> {$lang}#{$target_id}");
-                } else {
-                    if ($debug) WP_CLI::log("[ATTR] No pll mapping for FR#{$fr_id} -> {$lang}");
-                }
+            // 1) cherche par slug
+            $found = [];
+            if ($slug !== '') {
+                $found = get_terms([
+                    'taxonomy'   => $tax,
+                    'hide_empty' => false,
+                    'slug'       => $slug,
+                    'number'     => 1,
+                ]);
             }
 
-            // b) recherche par slug ou name
-            if (!$target_id) {
-                // liste de candidats : slug puis name (éventuellement slug-en si tu suffixes)
-                $cands = array_values(array_unique(array_filter([$slug, sanitize_title($name)])));
-                foreach ($cands as $cand) {
-                    // restreindre à la langue cible si possible (Polylang stocke la relation sur termmeta)
-                    $term = get_terms([
-                        'taxonomy'   => $tax,
-                        'hide_empty' => false,
-                        'slug'       => $cand,
-                        'number'     => 1,
-                    ]);
-                    if (!is_wp_error($term) && !empty($term)) {
-                        $tid = (int)$term[0]->term_id;
-                        // Vérifier langue du terme si Polylang actif
-                        if (function_exists('pll_get_term_language')) {
-                            $tl = pll_get_term_language($tid);
-                            if ($tl && strtolower($tl) !== $lang) {
-                                if ($debug) WP_CLI::log("[ATTR] Found slug '{$cand}' but in lang={$tl}, skip");
-                                // continue chercher un autre
-                            } else {
-                                $target_id = $tid;
-                                if ($debug) WP_CLI::log("[ATTR] Found by slug/name '{$cand}' -> term#{$tid}");
-                                break;
-                            }
-                        } else {
-                            $target_id = $tid;
-                            if ($debug) WP_CLI::log("[ATTR] Found by slug/name '{$cand}' -> term#{$tid} (no pll lang check)");
-                            break;
-                        }
+            $term_id = 0;
+            $must_create = false;
+
+            if (!is_wp_error($found) && !empty($found)) {
+                $found_id = (int) $found[0]->term_id;
+                $tlang = '';
+                if (function_exists('pll_get_term_language')) {
+                    $tlang = (string) pll_get_term_language($found_id);
+                }
+
+                if (!empty($tlang) && strtolower($tlang) === $lang) {
+                    // ✅ bon terme (langue cible). Met à jour le nom si différent
+                    $current_name = $found[0]->name;
+                    if ($name !== '' && $current_name !== $name) {
+                        wp_update_term($found_id, $tax, ['name' => $name]);
+                        if ($debug) WP_CLI::log("[ATTR] Updated name for #{$found_id} -> '{$name}'");
                     }
+                    $term_id = $found_id;
+                    if ($debug) WP_CLI::log("[ATTR] Use existing term #{$term_id} (lang={$lang})");
+                } else {
+                    // ❌ terme trouvé mais pas dans la langue cible -> on créera un clone EN
+                    $must_create = true;
+                    if ($debug) WP_CLI::log("[ATTR] Slug '{$slug}' exists in other lang ('{$tlang}') or no lang; will create {$lang} variant.");
                 }
+            } else {
+                // pas trouvé -> création
+                $must_create = true;
             }
 
-            // c) auto-create & link si toujours rien
-            if (!$target_id) {
-                // crée le terme en langue cible (utilise le nom FR à défaut)
-                $to_name = $name ?: $slug ?: ('attr-'.$fr_id);
-                $to_slug = $slug ? "{$slug}-{$lang}" : sanitize_title($to_name)."-{$lang}";
-                $ins = wp_insert_term($to_name, $tax, ['slug'=>$to_slug]);
+            if ($must_create) {
+                $to_name = $name !== '' ? $name : ($slug !== '' ? $slug : 'attribute');
+                // éviter collision avec le FR : suffixer le slug si déjà pris
+                $base_slug = ($slug !== '') ? $slug : sanitize_title($to_name);
+                $to_slug = $base_slug;
+
+                // si le slug existe déjà, suffixe '-{lang}'
+                $exists = get_terms(['taxonomy'=>$tax,'hide_empty'=>false,'slug'=>$to_slug,'number'=>1]);
+                if (!is_wp_error($exists) && !empty($exists)) {
+                    $to_slug = $base_slug . '-' . $lang;
+                }
+
+                $ins = wp_insert_term($to_name, $tax, ['slug' => $to_slug]);
                 if (!is_wp_error($ins)) {
-                    $target_id = (int)$ins['term_id'];
-                    if ($debug) WP_CLI::log("[ATTR] Created term {$tax}#{$target_id} ({$lang}) from FR#{$fr_id} '{$to_name}'");
+                    $term_id = (int) $ins['term_id'];
+                    if ($debug) WP_CLI::log("[ATTR] Created term #{$term_id} name='{$to_name}' slug='{$to_slug}'");
 
-                    // pose langue & lien de traduction si Polylang
-                    if (function_exists('pll_set_term_language') && function_exists('pll_save_term_translations')) {
-                        pll_set_term_language($target_id, $lang);
-                        // récupérer le groupe existant du FR
-                        if ($fr_id) {
-                            // construire la map existante
-                            $map = [];
-                            if (function_exists('pll_get_term_translations')) {
-                                $map = (array)pll_get_term_translations($fr_id);
-                            }
-                            // injecter/écraser la langue cible
-                            $map[$lang] = $target_id;
-                            pll_save_term_translations($map);
-                            if ($debug) WP_CLI::log("[ATTR] Linked FR#{$fr_id} <-> {$lang}#{$target_id}");
-                        }
+                    // Pose la langue si Polylang (PAS de linking interlangue)
+                    if ($term_id && $lang && function_exists('pll_set_term_language')) {
+                        pll_set_term_language($term_id, $lang);
                     }
                 } else {
-                    if ($debug) WP_CLI::warning("[ATTR] wp_insert_term failed for '{$to_name}': ".$ins->get_error_message());
+                    if ($debug) WP_CLI::warning("[ATTR] create failed: ".$ins->get_error_message());
                 }
             }
 
-            if ($target_id) $target_ids[] = $target_id;
+            if ($term_id) $target_ids[] = $term_id;
         }
 
-        $target_ids = array_values(array_unique(array_filter($target_ids, static fn($v)=>$v>0)));
+
+        $target_ids = array_values(array_unique(array_filter($target_ids)));
         if (empty($target_ids)) {
-            if ($debug) WP_CLI::log("[ATTR] Rien d'assignable in fine.");
+            if ($debug) WP_CLI::log("[ATTR] Liste d’IDs vide; rien à assigner.");
             return;
         }
 
         $res = wp_set_object_terms($post_id, $target_ids, $tax, false);
-        if (is_wp_error($res)) WP_CLI::warning("[ATTR] Erreur assignation {$tax} sur #{$post_id}: ".$res->get_error_message());
-        else if ($debug) WP_CLI::log("[ATTR] Set {$tax} on #{$post_id} final ids=".json_encode($target_ids));
+        if (is_wp_error($res)) {
+            WP_CLI::warning("[ATTR] Erreur assignation {$tax} sur #{$post_id}: ".$res->get_error_message());
+        } else {
+            if ($debug) WP_CLI::log("[ATTR] Set {$tax} on #{$post_id} ids=".json_encode($target_ids));
+        }
     }
+
+
+    private function assign_attributes_from_row( int $post_id, array $row, string $lang, bool $debug = false ): void {
+        $tax = 'al_product-attributes';
+        if (!taxonomy_exists($tax)) { if ($debug) WP_CLI::warning("[ATTR] Taxonomy '{$tax}' inexistante"); return; }
+
+        // Normalise code langue
+        $lang = function_exists('normalize_lang_code') ? normalize_lang_code($lang) : strtolower(trim((string)$lang));
+
+        // A) IDs explicites par langue (al_product-attributes_ids[lang])
+        $ids_key = $tax . '_ids';
+        $ids_to_set = [];
+        if (!empty($row[$ids_key]) && !empty($row[$ids_key][$lang]) && is_array($row[$ids_key][$lang])) {
+            $ids_to_set = array_values(array_filter(array_map('intval', $row[$ids_key][$lang]), static fn($v)=>$v>0));
+            if ($debug) WP_CLI::log("[ATTR] {$ids_key}[{$lang}] => ".json_encode($ids_to_set));
+        }
+
+        // B) Sinon, partir des termes FR exportés (tax.al_product-attributes)
+        if (empty($ids_to_set) && !empty($row['tax'][$tax]) && is_array($row['tax'][$tax])) {
+            $targets = [];
+            foreach ($row['tax'][$tax] as $fr) {
+                if (!is_array($fr)) continue;
+                $fr_id = isset($fr['id']) ? (int)$fr['id'] : 0;
+                $slug  = isset($fr['slug']) ? (string)$fr['slug'] : '';
+                $name  = isset($fr['name']) ? (string)$fr['name'] : '';
+
+                $tid = 0;
+                // 1) mapping direct via Polylang
+                if ($fr_id && function_exists('pll_get_term')) {
+                    $mapped = (int)pll_get_term($fr_id, $lang);
+                    if ($mapped) { $tid = $mapped; if ($debug) WP_CLI::log("[ATTR] pll_get_term FR#{$fr_id} -> {$lang}#{$tid}"); }
+                }
+                // 2) recherche par slug/name
+                if (!$tid) {
+                    foreach (array_unique(array_filter([$slug, sanitize_title($name)])) as $cand) {
+                        $found = get_terms(['taxonomy'=>$tax,'hide_empty'=>false,'slug'=>$cand,'number'=>1]);
+                        if (!is_wp_error($found) && !empty($found)) {
+                            $found_id = (int)$found[0]->term_id;
+                            $ok = true; $tlang = '';
+                            if (function_exists('pll_get_term_language')) {
+                                $tlang = (string)pll_get_term_language($found_id);
+                                if (!empty($tlang) && strtolower($tlang) !== $lang) { $ok = false; }
+                            }
+                            if ($ok) {
+                                // Pose langue si absente
+                                if (empty($tlang) && function_exists('pll_set_term_language')) {
+                                    pll_set_term_language($found_id, $lang);
+                                    if ($debug) WP_CLI::log("[ATTR] Set term #{$found_id} lang={$lang}");
+                                }
+                                // Lier au FR si possible
+                                if ($fr_id && function_exists('pll_get_term_translations') && function_exists('pll_save_term_translations')) {
+                                    $map = (array)pll_get_term_translations($fr_id);
+                                    $map[$lang] = $found_id;
+                                    pll_save_term_translations($map);
+                                }
+                                $tid = $found_id;
+                                if ($debug) WP_CLI::log("[ATTR] Found by slug/name '{$cand}' -> #{$tid}");
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 3) créer + lier si rien
+                if (!$tid) {
+                    $to_name = $name ?: ($slug ?: "attr-$fr_id");
+                    $to_slug = $slug ? "{$slug}-{$lang}" : sanitize_title($to_name)."-{$lang}";
+                    $ins = wp_insert_term($to_name, $tax, ['slug'=>$to_slug]);
+                    if (!is_wp_error($ins)) {
+                        $tid = (int)$ins['term_id'];
+                        if (function_exists('pll_set_term_language')) pll_set_term_language($tid, $lang);
+                        if ($fr_id && function_exists('pll_get_term_translations') && function_exists('pll_save_term_translations')) {
+                            $map = (array)pll_get_term_translations($fr_id);
+                            $map[$lang] = $tid;
+                            pll_save_term_translations($map);
+                        }
+                        if ($debug) WP_CLI::log("[ATTR] Created #{$tid} ({$lang}) from FR#{$fr_id}");
+                    } else {
+                        if ($debug) WP_CLI::warning("[ATTR] create failed: ".$ins->get_error_message());
+                    }
+                }
+
+                if ($tid) $targets[] = $tid;
+            }
+            $ids_to_set = array_values(array_unique(array_filter($targets)));
+        }
+
+        // Filtrer pour ne garder QUE des termes dans la langue cible (ou sans langue)
+        if (function_exists('pll_get_term_language') && !empty($ids_to_set)) {
+            $ids_to_set = array_values(array_filter($ids_to_set, function($tid) use ($lang) {
+                $tl = pll_get_term_language($tid);
+                return empty($tl) || strtolower($tl) === $lang;
+            }));
+        }
+        if (empty($ids_to_set)) { if ($debug) WP_CLI::log("[ATTR] Aucun ID à assigner"); return; }
+
+        $res = wp_set_object_terms($post_id, $ids_to_set, $tax, false);
+        if (is_wp_error($res)) WP_CLI::warning("[ATTR] Erreur assignation {$tax} sur #{$post_id}: ".$res->get_error_message());
+        elseif ($debug) WP_CLI::log("[ATTR] Set {$tax} on #{$post_id} ids=".json_encode($ids_to_set));
+    }
+
 
 
     /**
@@ -265,6 +766,11 @@ class AL_Product_Importer_Command {
             @ic_flush_product_cache($post_id);
             if ($debug) WP_CLI::log("[FINALIZE] ic_flush_product_cache({$post_id})");
         }
+
+        // Hooks génériques souvent écoutés par ImpleCode / thèmes
+        do_action('ic_after_save_product', $post_id);
+        do_action('ic_catalog_product_updated', $post_id);
+        do_action('catalog_product_updated', $post_id);
 
         // Transients ImpleCode potentiels (purge large mais sûre)
         $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_transient\_ic\_%' OR option_name LIKE '\_transient\_timeout\_ic\_%' OR option_name LIKE '\_transient\_epc\_%' OR option_name LIKE '\_transient\_timeout\_epc\_%'" );
@@ -345,7 +851,8 @@ class AL_Product_Importer_Command {
             update_post_meta( $post_id, '_gallery_ids', $gallery_ids );
         }
     }
-public function import( $args, $assoc ) {
+
+    public function import( $args, $assoc ) {
         $file              = $assoc['file'] ?? null;
         $do_update         = isset($assoc['update']) ? (int)$assoc['update'] : 0;
         $update_if_changed = isset($assoc['update-if-changed']) ? (int)$assoc['update-if-changed'] : 0;
@@ -383,6 +890,7 @@ public function import( $args, $assoc ) {
             $content   = (string)($row['content_long'] ?? '');
             $excerpt   = (string)($row['content_short'] ?? '');
             $meta      = (array)($row['meta'] ?? []);
+            $this->current_row_meta = $meta; // <— AJOUT
             $tax       = (array)($row['tax'] ?? []);
             $source_id = $row['source_id'] ?? null;
             $json_lang = isset($row['lang']) ? strtolower(trim($row['lang'])) : '';
@@ -512,33 +1020,37 @@ public function import( $args, $assoc ) {
                 update_post_meta($actual_id, $k, $v);
             }
 
-            // >>> Ajouts : langue / linking / taxos / FINALIZE par item
-            $__prod_lang = !empty($row['lang']) && is_string($row['lang']) ? $row['lang'] : '';
-            $__prod_lang = function_exists('normalize_lang_code') ? normalize_lang_code($__prod_lang) : strtolower(trim($__prod_lang));
-            $__debug_any = true; // force logs pendant les tests; mets false ensuite si tu veux
+            /* === Langue + linking + catégories + attributs (valeurs uniquement) === */
 
-            // Pose de la langue
-            if ( !empty($__prod_lang) && function_exists('pll_set_post_language') ) {
+            // Langue normalisée à partir du JSON
+            $__prod_lang = '';
+            if (!empty($row['lang']) && is_string($row['lang'])) {
+                $__prod_lang = $this->normalize_lang_code($row['lang']);
+            }
+
+            // Active les logs détaillés si besoin
+            $__debug_any = true; // passe à false en prod si tu veux
+
+            // 1) Langue Polylang
+            if ($__prod_lang !== '' && function_exists('pll_set_post_language')) {
                 pll_set_post_language($actual_id, $__prod_lang);
                 if ($__debug_any) WP_CLI::log("[DEBUG] set lang {$__prod_lang} on ID {$actual_id}");
             }
 
-            // Linking interlangues (si option)
-            if ( !empty($assoc_args['link-siblings']) && method_exists($this, 'link_with_siblings') ) {
+            // 2) Linking interlangues (optionnel via --link-siblings=1)
+            if (!empty($assoc['link-siblings']) && method_exists($this, 'link_with_siblings')) {
                 $this->link_with_siblings($actual_id, $row, $__prod_lang, $__debug_any);
             }
 
-            // Catégories traduites (si export les fournit)
+            // 3) Catégories traduites depuis al_product-cat_ids
             if (method_exists($this, 'assign_categories_from_ids')) {
                 $this->assign_categories_from_ids($actual_id, $row, $__prod_lang, $__debug_any);
             }
 
-            // Attributs traduits
-            if (method_exists($this, 'assign_attributes_from_row')) {
-                $this->assign_attributes_from_row($actual_id, $row, $__prod_lang, $__debug_any);
-            }
+            // 4) Valeurs d’attributs depuis métas (_attribute1..3), SANS toucher aux labels (gérés par Polylang)
+            $this->assign_attribute_values_only_from_meta($actual_id, $__prod_lang, $__debug_any);
 
-            // FINALIZE: appliquer immédiatement côté ImpleCode
+            // 5) FINALIZE : force ImpleCode à recalculer / rafraîchir le front
             $this->finalize_product_apply_attributes($actual_id, $__debug_any);
 
             
