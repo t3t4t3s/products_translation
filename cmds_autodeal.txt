@@ -44,3 +44,12 @@ scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-alprod-fix-li.php
 
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-fix-li.php alprod fix-li-p --run --verbose
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-alprod-fix-li.php alprod fix-li-p --run --id=10303 --verbose
+
+6 - RESTORE FR ATTRIBUTES
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-restore-fr-attributes.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-restore-fr-attributes.php alprod restore-fr-attributes --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_fr.json
+
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-normalize-fr-attr-parents.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-normalize-fr-attr-parents.php alprod normalize-fr-parents
+
+
