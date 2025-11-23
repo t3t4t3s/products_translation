@@ -52,3 +52,10 @@ php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html 
 scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-normalize-fr-attr-parents.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-normalize-fr-attr-parents.php alprod normalize-fr-parents
 
+
+7 - RESTORE ATTRIBUTES MULTI LANGUES
+
+scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-restore-attrs-multi.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-restore-attrs-multi.php alprod restore-attrs --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_fr.json --lang=fr
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-restore-attrs-multi.php alprod restore-attrs --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_en.json --lang=en
+php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-restore-attrs-multi.php alprod restore-attrs --file=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/products_es.json --lang=es
