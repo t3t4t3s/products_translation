@@ -52,4 +52,3 @@ php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html 
 scp "C:\Users\jeanc\JCJ\translation\products_translation\wpcli-normalize-fr-attr-parents.php" autodeal-prod:/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/
 php ~/wp-cli.phar --path=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html --require=/home/u92-h2sdr5s4x5fy/www/autodealsxm.com/public_html/wpcli-normalize-fr-attr-parents.php alprod normalize-fr-parents
 
-
